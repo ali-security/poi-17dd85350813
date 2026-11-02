@@ -4,18 +4,27 @@
 name: Java CI with Gradle
 
 on:
-  push:
-    branches: [ trunk ]
-  pull_request:
-    branches: [ trunk ]
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional Gradle test selector (e.g. :poi-ooxml:test --tests TestXSSFWorkbook); empty runs the full check'
+        required: false
+        default: ''
 
 jobs:
   build:
 
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     steps:
     - uses: actions/checkout@v2
+
+    - name: Set up JDK 8 (release toolchain for the published jar)
+      uses: actions/setup-java@v2
+      with:
+        distribution: 'temurin'
+        java-version: '8'
 
     - name: Set up JDK
       uses: actions/setup-java@v2
@@ -25,7 +34,7 @@ jobs:
         check-latest: true
 
     - name: Cache Gradle wrapper and dependencies
-      uses: actions/cache@v2.1.3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.gradle/caches
@@ -40,5 +49,152 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
+    - name: Build skip-reason listener
+      run: |
+        # Gradle's JUnit XML drops @Disabled reasons and assumption messages, so a
+        # JUnit Platform listener records them to a file printed after the run.
+        mkdir -p /tmp/seal-listener/src/seal /tmp/seal-listener/classes/META-INF/services /tmp/seal-listener/lib
+        cd /tmp/seal-listener/lib
+        for a in junit-platform-launcher junit-platform-engine junit-platform-commons; do
+          curl -sSfLO https://repo.maven.apache.org/maven2/org/junit/platform/$a/1.8.2/$a-1.8.2.jar
+        done
+        curl -sSfLO https://repo.maven.apache.org/maven2/org/opentest4j/opentest4j/1.2.0/opentest4j-1.2.0.jar
+        cat > /tmp/seal-listener/src/seal/SkipReasonListener.java <<'JAVA'
+        package seal;
+        import java.io.FileWriter;
+        import java.io.PrintWriter;
+        import org.junit.platform.engine.TestExecutionResult;
+        import org.junit.platform.launcher.TestExecutionListener;
+        import org.junit.platform.launcher.TestIdentifier;
+        public class SkipReasonListener implements TestExecutionListener {
+            private static synchronized void log(String line) {
+                try (PrintWriter w = new PrintWriter(new FileWriter("/tmp/seal-skip-reasons.txt", true))) {
+                    w.println(line);
+                } catch (Exception e) { /* ignore */ }
+            }
+            private static String name(TestIdentifier id) {
+                return id.getUniqueId().replaceAll("\\[engine:[^\\]]*\\]/", "") + " (" + id.getDisplayName() + ")";
+            }
+            @Override
+            public void executionSkipped(TestIdentifier id, String reason) {
+                log("SKIP-REASON disabled " + name(id) + ": " + reason);
+            }
+            @Override
+            public void executionFinished(TestIdentifier id, TestExecutionResult result) {
+                if (result.getStatus() == TestExecutionResult.Status.ABORTED) {
+                    Throwable t = result.getThrowable().orElse(null);
+                    String where = "";
+                    if (t != null) {
+                        for (StackTraceElement e : t.getStackTrace()) {
+                            if (e.getClassName().startsWith("org.apache.poi")) { where = " at " + e; break; }
+                        }
+                    }
+                    log("SKIP-REASON aborted " + name(id) + ": " + (t == null ? "aborted" : t.getMessage()) + where);
+                }
+            }
+        }
+        JAVA
+        echo seal.SkipReasonListener > /tmp/seal-listener/classes/META-INF/services/org.junit.platform.launcher.TestExecutionListener
+        javac -cp "$(ls /tmp/seal-listener/lib/*.jar | tr '\n' ':')" -d /tmp/seal-listener/classes /tmp/seal-listener/src/seal/SkipReasonListener.java
+        jar cf /tmp/seal-listener/seal-skip-listener.jar -C /tmp/seal-listener/classes .
+        rm -f /tmp/seal-skip-reasons.txt
+
+    - name: Enable per-test result logging
+      run: |
+        mkdir -p ~/.gradle/init.d
+        cat > ~/.gradle/init.d/seal-test-logging.gradle <<'GRADLE'
+        allprojects {
+            tasks.withType(Test).configureEach {
+                doFirst { classpath = classpath + files('/tmp/seal-listener/seal-skip-listener.jar', '/tmp/seal-listener/lib/junit-platform-launcher-1.8.2.jar') }
+                testLogging {
+                    events 'passed', 'skipped', 'failed'
+                    exceptionFormat 'full'
+                }
+                afterSuite { desc, result ->
+                    if (result.resultType == TestResult.ResultType.FAILURE && result.exceptions) {
+                        println "SUITE FAILURE ${desc}:"
+                        result.exceptions.each { it.printStackTrace(System.out) }
+                    }
+                    if (!desc.parent) {
+                        println "TEST SUMMARY ${project.path}: ${result.resultType} - ${result.testCount} tests, ${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped"
+                    }
+                }
+            }
+        }
+        GRADLE
+
     - name: Build with Gradle
-      run: ./gradlew check
+      run: |
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          ./gradlew ${{ inputs.test-filter }}
+        else
+          ./gradlew check
+        fi
+
+    - name: List skipped tests with reasons
+      if: always()
+      run: |
+        cat > /tmp/seal-report.py <<'PY'
+        import glob, os, re, sys
+        import xml.etree.ElementTree as ET
+        # Index test sources so a bare assumeTrue(...) skip can be explained by its source line.
+        src = {}
+        for p in glob.glob('*/src/test/java/**/*.java', recursive=True):
+            src.setdefault(os.path.basename(p), p)
+        def explain(line):
+            m = re.search(r'\(([A-Za-z0-9_$]+\.java):(\d+)\)\s*$', line)
+            if not m or m.group(1) not in src:
+                return line
+            lines = open(src[m.group(1)], encoding='utf-8', errors='replace').read().splitlines()
+            n = int(m.group(2))
+            code = lines[n - 1].strip() if n <= len(lines) else ''
+            comment = ''
+            for k in range(n - 2, max(n - 6, -1), -1):
+                t = lines[k].strip()
+                if t.startswith('//'):
+                    comment = t.lstrip('/ ').strip()
+                    break
+            extra = ' -> source: `%s`' % code
+            if comment:
+                extra += ' (comment: %s)' % comment
+            return line + extra
+        if os.path.exists('/tmp/seal-skip-reasons.txt'):
+            entries = sorted(set(open('/tmp/seal-skip-reasons.txt').read().splitlines()))
+            for e in entries:
+                print(explain(e))
+            print('SKIP-REASON total entries: %d' % len(entries))
+        else:
+            print('No skipped or aborted tests recorded')
+        # Re-print the per-module JUnit totals so they sit at the end of the log.
+        grand = [0, 0, 0, 0]
+        for mod in sorted(glob.glob('*/build/test-results/test')):
+            t = f = e = s = 0
+            for x in glob.glob(mod + '/TEST-*.xml'):
+                r = ET.parse(x).getroot()
+                t += int(r.get('tests', 0)); f += int(r.get('failures', 0))
+                e += int(r.get('errors', 0)); s += int(r.get('skipped', 0))
+            name = mod.split('/')[0]
+            print('JUNIT TOTALS %s: %d tests, %d passed, %d failed, %d errors, %d skipped' % (name, t, t - f - e - s, f, e, s))
+            for i, v in enumerate((t, f, e, s)):
+                grand[i] += v
+        t, f, e, s = grand
+        print('JUNIT TOTALS ALL MODULES: %d tests, %d passed, %d failed, %d errors, %d skipped' % (t, t - f - e - s, f, e, s))
+        PY
+        python3 /tmp/seal-report.py
+
+    - name: Build poi-ooxml jar
+      # The 5.2.0 release jar was built on JDK 8 (class version 52, cached java9 module-info.class)
+      run: |
+        ./gradlew --stop
+        # the JDK 11 check run's cacheJava9/cacheTest9 tasks overwrite the committed src/*/java9/*.class files
+        git status --short
+        git checkout -- .
+        JAVA_HOME=$JAVA_HOME_8_X64 ./gradlew clean :poi-ooxml:jar
+        unzip -p build/dist/maven/poi-ooxml/poi-ooxml-5.2.0.jar META-INF/MANIFEST.MF
+
+    - name: Upload poi-ooxml jar
+      uses: actions/upload-artifact@v4
+      with:
+        name: poi-ooxml-jar
+        path: build/dist/maven/poi-ooxml/poi-ooxml-5.2.0.jar
+        if-no-files-found: error
