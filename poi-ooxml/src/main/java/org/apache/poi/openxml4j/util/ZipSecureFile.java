@@ -19,11 +19,17 @@ package org.apache.poi.openxml4j.util;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Enumeration;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
 
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.poi.openxml4j.opc.internal.InvalidZipException;
+import org.apache.poi.util.IOUtils;
 
 /**
  * This class wraps a {@link ZipFile} in order to check the
@@ -128,14 +134,28 @@ public class ZipSecureFile extends ZipFile {
         return MAX_TEXT_SIZE;
     }
 
+    /**
+     * @param file the zip file to open
+     * @throws IOException if an error occurs while opening the zip file
+     * @throws InvalidZipException if the input file contains an entry with an empty name
+     *  or more than 1 entry with the same name
+     */
     public ZipSecureFile(File file) throws IOException {
         super(file);
         this.fileName = file.getAbsolutePath();
+        validateEntryNames();
     }
 
+    /**
+     * @param name the name of the zip file to open
+     * @throws IOException if an error occurs while opening the zip file
+     * @throws InvalidZipException if the input file contains an entry with an empty name
+     *  or more than 1 entry with the same name
+     */
     public ZipSecureFile(String name) throws IOException {
         super(name);
         this.fileName = new File(name).getAbsolutePath();
+        validateEntryNames();
     }
 
     /**
@@ -165,5 +185,24 @@ public class ZipSecureFile extends ZipFile {
      */
     public String getName() {
         return fileName;
+    }
+
+    private void validateEntryNames() throws IOException {
+        final Enumeration<ZipArchiveEntry> en = getEntries();
+        final Set<String> filenames = new HashSet<>();
+        while (en.hasMoreElements()) {
+            final ZipArchiveEntry entry = en.nextElement();
+            String name = entry.getName();
+            if (name == null || name.isEmpty()) {
+                IOUtils.closeQuietly(this);
+                throw new InvalidZipException("Input file contains an entry with an empty name");
+            }
+            name = name.replace('\\', '/').toLowerCase(Locale.ROOT);
+            if (filenames.contains(name)) {
+                IOUtils.closeQuietly(this);
+                throw new InvalidZipException("Input file contains more than 1 entry with the name " + entry.getName());
+            }
+            filenames.add(name);
+        }
     }
 }

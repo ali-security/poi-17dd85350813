@@ -35,6 +35,7 @@ import org.apache.poi.openxml4j.opc.PackageRelationshipCollection;
 import org.apache.poi.openxml4j.opc.PackageRelationshipTypes;
 import org.apache.poi.openxml4j.opc.PackagingURIHelper;
 import org.apache.poi.openxml4j.opc.TargetMode;
+import org.apache.poi.openxml4j.opc.internal.InvalidZipException;
 import org.apache.poi.util.IOUtils;
 import org.apache.poi.util.Removal;
 
@@ -53,11 +54,16 @@ public final class PackageHelper {
      * @since POI 5.2.0
      * @return OPCPackage
      * @throws IOException
+     * @throws POIXMLException If the stream is not a valid OPC package
      */
     public static OPCPackage open(InputStream stream, boolean closeStream) throws IOException {
         try {
             return OPCPackage.open(stream);
-        } catch (InvalidFormatException e){
+        } catch (InvalidFormatException e) {
+            final Throwable cause = e.getCause();
+            if (cause instanceof InvalidZipException) {
+                throw (InvalidZipException) cause;
+            }
             throw new POIXMLException(e);
         } finally {
             if (closeStream) {

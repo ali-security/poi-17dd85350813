@@ -50,6 +50,7 @@ import org.apache.poi.openxml4j.exceptions.OpenXML4JRuntimeException;
 import org.apache.poi.openxml4j.exceptions.PartAlreadyExistsException;
 import org.apache.poi.openxml4j.opc.internal.ContentType;
 import org.apache.poi.openxml4j.opc.internal.ContentTypeManager;
+import org.apache.poi.openxml4j.opc.internal.InvalidZipException;
 import org.apache.poi.openxml4j.opc.internal.PackagePropertiesPart;
 import org.apache.poi.openxml4j.opc.internal.PartMarshaller;
 import org.apache.poi.openxml4j.opc.internal.PartUnmarshaller;
@@ -279,7 +280,15 @@ public abstract class OPCPackage implements RelationshipSource, Closeable {
           throw new IllegalArgumentException("file must not be a directory");
       }
 
-      OPCPackage pack = new ZipPackage(file, access);
+       final OPCPackage pack;
+       try {
+           pack = new ZipPackage(file, access);
+       } catch (InvalidOperationException e) {
+           if (e.getCause() instanceof InvalidZipException) {
+               throw new InvalidFormatException(e.getMessage(), e);
+           }
+           throw e;
+       }
        try {
            if (pack.partList == null && access != PackageAccess.WRITE) {
                pack.getParts();
@@ -309,7 +318,12 @@ public abstract class OPCPackage implements RelationshipSource, Closeable {
      */
     public static OPCPackage open(InputStream in) throws InvalidFormatException,
             IOException {
-        OPCPackage pack = new ZipPackage(in, PackageAccess.READ_WRITE);
+        final OPCPackage pack;
+        try {
+            pack = new ZipPackage(in, PackageAccess.READ_WRITE);
+        } catch (InvalidZipException e) {
+            throw new InvalidFormatException(e.getMessage(), e);
+        }
         try {
             if (pack.partList == null) {
                 pack.getParts();

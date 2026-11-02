@@ -17,12 +17,24 @@
 package org.apache.poi.openxml4j.util;
 
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.apache.commons.compress.archivers.zip.ZipFile;
+import org.apache.commons.io.output.UnsynchronizedByteArrayOutputStream;
+import org.apache.poi.hssf.HSSFTestDataSamples;
+import org.apache.poi.openxml4j.opc.internal.InvalidZipException;
+import org.apache.poi.openxml4j.opc.internal.ZipHelper;
 import org.apache.poi.util.IOUtils;
+import org.apache.poi.util.TempFile;
 import org.apache.poi.xssf.XSSFTestDataSamples;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Enumeration;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -78,5 +90,118 @@ class TestZipSecureFile {
         } finally {
             ZipSecureFile.setMaxTextSize(ZipSecureFile.DEFAULT_MAX_TEXT_SIZE);
         }
+    }
+
+    @Test
+    void testDuplicateEntryNamesFile() {
+        File file = XSSFTestDataSamples.getSampleFile("duplicate-file.xlsx");
+        InvalidZipException ex = assertThrows(InvalidZipException.class, () -> {
+            try (ZipSecureFile zf = new ZipSecureFile(file)) {
+                // expect exception here
+            }
+        });
+        assertEquals("Input file contains more than 1 entry with the name xl/worksheets/sheet1.xml", ex.getMessage());
+
+        ex = assertThrows(InvalidZipException.class, () -> {
+            try (ZipSecureFile zf = new ZipSecureFile(file.getAbsolutePath())) {
+                // expect exception here
+            }
+        });
+        assertEquals("Input file contains more than 1 entry with the name xl/worksheets/sheet1.xml", ex.getMessage());
+    }
+
+    @Test
+    void testDuplicateEntryNamesStream() {
+        InvalidZipException ex = assertThrows(InvalidZipException.class, () -> {
+            try (InputStream is = HSSFTestDataSamples.openSampleFileStream("duplicate-file.xlsx");
+                 ZipInputStreamZipEntrySource zes = new ZipInputStreamZipEntrySource(ZipHelper.openZipStream(is))) {
+                // expect exception here
+            }
+        });
+        assertEquals("Input file contains more than 1 entry with the name xl/worksheets/sheet1.xml", ex.getMessage());
+    }
+
+    @Test
+    void testDuplicateEntryNamesDifferentCase() throws IOException {
+        assertRejected("Input file contains more than 1 entry with the name XL/Worksheets/Sheet1.xml",
+                "[Content_Types].xml", "xl/worksheets/sheet1.xml", "XL/Worksheets/Sheet1.xml");
+    }
+
+    @Test
+    void testDuplicateEntryNamesMixedSeparators() throws IOException {
+        assertRejected("Input file contains more than 1 entry with the name xl/worksheets\\sheet1.xml",
+                "[Content_Types].xml", "xl/worksheets/sheet1.xml", "xl/worksheets\\sheet1.xml");
+    }
+
+    @Test
+    void testEmptyEntryName() throws IOException {
+        assertRejected("Input file contains an entry with an empty name",
+                "[Content_Types].xml", "");
+    }
+
+    @Test
+    void testDistinctEntryNames() throws IOException {
+        final byte[] data = createZip("[Content_Types].xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet10.xml");
+        final File file = writeTempFile(data);
+        try {
+            try (ZipSecureFile zf = new ZipSecureFile(file)) {
+                assertNotNull(zf.getEntry("xl/worksheets/sheet10.xml"));
+            }
+        } finally {
+            assertTrue(file.delete());
+        }
+        try (ZipInputStreamZipEntrySource zes = new ZipInputStreamZipEntrySource(
+                ZipHelper.openZipStream(toInputStream(data)))) {
+            assertNotNull(zes.getEntry("xl/worksheets/sheet1.xml"));
+            assertNotNull(zes.getEntry("xl/worksheets/sheet10.xml"));
+        }
+    }
+
+    private static void assertRejected(String expectedMessage, String... entryNames) throws IOException {
+        final byte[] data = createZip(entryNames);
+        final File file = writeTempFile(data);
+        try {
+            InvalidZipException ex = assertThrows(InvalidZipException.class, () -> {
+                try (ZipSecureFile zf = new ZipSecureFile(file)) {
+                    // expect exception here
+                }
+            });
+            assertEquals(expectedMessage, ex.getMessage());
+        } finally {
+            assertTrue(file.delete());
+        }
+
+        InvalidZipException ex = assertThrows(InvalidZipException.class, () -> {
+            try (ZipInputStreamZipEntrySource zes = new ZipInputStreamZipEntrySource(
+                    ZipHelper.openZipStream(toInputStream(data)))) {
+                // expect exception here
+            }
+        });
+        assertEquals(expectedMessage, ex.getMessage());
+    }
+
+    private static byte[] createZip(String... entryNames) throws IOException {
+        final UnsynchronizedByteArrayOutputStream bos = new UnsynchronizedByteArrayOutputStream();
+        try (ZipArchiveOutputStream zos = new ZipArchiveOutputStream(bos)) {
+            int i = 0;
+            for (String entryName : entryNames) {
+                zos.putArchiveEntry(new ZipArchiveEntry(entryName));
+                zos.write(("<entry" + (i++) + "/>").getBytes(StandardCharsets.UTF_8));
+                zos.closeArchiveEntry();
+            }
+        }
+        return bos.toByteArray();
+    }
+
+    private static InputStream toInputStream(byte[] data) {
+        return new ByteArrayInputStream(data);
+    }
+
+    private static File writeTempFile(byte[] data) throws IOException {
+        final File file = TempFile.createTempFile("zip-entry-names", ".zip");
+        try (OutputStream os = new FileOutputStream(file)) {
+            os.write(data);
+        }
+        return file;
     }
 }

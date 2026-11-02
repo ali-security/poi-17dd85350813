@@ -78,7 +78,8 @@ public class TestAllFiles {
         "lost+found",
         "**/.git/**",
         "**/ExternalEntityInText.docx", //the DocType (DTD) declaration causes this to fail
-        "**/right-to-left.xlsx" //the threaded comments in this file cause XSSF clone to fail
+        "**/right-to-left.xlsx", //the threaded comments in this file cause XSSF clone to fail
+        "**/duplicate-file.xlsx" // intentionally malformed: duplicate zip entries, rejected since CVE-2025-31672
     };
 
     // cheap workaround of skipping the few problematic files
@@ -88,6 +89,7 @@ public class TestAllFiles {
         "**/.git/**",
         "**/ExternalEntityInText.docx", //the DocType (DTD) declaration causes this to fail
         "**/right-to-left.xlsx", //the threaded comments in this file cause XSSF clone to fail
+        "**/duplicate-file.xlsx", // intentionally malformed: duplicate zip entries, rejected since CVE-2025-31672
         "document/word2.doc",
         "document/cpansearch.perl.org_src_tobyink_acme-rundoc-0.001_word-lib_hello_world.docm",
         "hpsf/Test0313rur.adm",
